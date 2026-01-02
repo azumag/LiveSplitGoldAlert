@@ -12,12 +12,10 @@ if !A_IsAdmin {
 ; LiveSplit接続設定
 LiveSplitHost := "127.0.0.1"
 LiveSplitPort := 16834
-PreviousSplitIndex := -1
 PreviousDelta := ""
 DebugMode := true  ; デバッグモード
 CheckInterval := 2000  ; チェック間隔（ミリ秒）- 2秒に1回
 LastCheckTime := 0
-CachedSplitIndex := -1
 AutoHideDelay := 10000  ; 自動非表示までの時間（ミリ秒）- 10秒
 IsVideoVisible := false  ; 動画が表示されているか
 PlayBeepSound := false  ; ビープ音を鳴らすか
@@ -45,6 +43,19 @@ DebugLog(msg) {
 ; LiveSplitにTCPソケット経由でコマンドを送信（PowerShell経由）
 SendLiveSplitCommand(command) {
     global LiveSplitHost, LiveSplitPort
+
+    ; セキュリティ: 入力検証
+    ; ホストは127.0.0.1またはlocalhostのみ許可
+    if (LiveSplitHost != "127.0.0.1" && LiveSplitHost != "localhost") {
+        DebugLog("Security: Invalid host rejected: " . LiveSplitHost)
+        return ""
+    }
+
+    ; ポートは1-65535の数値のみ許可
+    if (!IsInteger(LiveSplitPort) || LiveSplitPort < 1 || LiveSplitPort > 65535) {
+        DebugLog("Security: Invalid port rejected: " . LiveSplitPort)
+        return ""
+    }
 
     ; PowerShellスクリプトを一時ファイルに作成
     psScript := (
@@ -106,7 +117,7 @@ SendLiveSplitCommand(command) {
 }
 
 CheckGold() {
-    global PreviousSplitIndex, PreviousDelta, LastCheckTime, CachedSplitIndex
+    global PreviousDelta, LastCheckTime
 
     ; レート制限: 最後のチェックから500ms以内は何もしない
     currentTime := A_TickCount
@@ -152,7 +163,7 @@ CheckGold() {
 
                 if (delta2 == delta) {
                     DebugLog("*** CONFIRMED GOLD - Triggering alert! ***")
-                    CheckForGoldSimple(delta, 0)
+                    TriggerGoldAlert(delta)
                 } else {
                     DebugLog("Delta changed during re-check - skipping")
                 }
@@ -167,71 +178,38 @@ CheckGold() {
     }
 }
 
-CheckForGoldSimple(delta, splitIndex) {
-    ; デルタがマイナスならゴールド
-    DebugLog("Checking delta: [" . delta . "] (Length: " . StrLen(delta) . ") for split " . splitIndex)
+; ゴールドアラートをトリガー
+TriggerGoldAlert(delta) {
+    DebugLog("!!! GOLD SPLIT DETECTED !!! Sending hotkey to OBS...")
+    DebugLog("Delta: [" . delta . "]")
 
-    isGold := false
-    reason := ""
+    global AutoHideDelay, IsVideoVisible, PlayBeepSound
 
-    ; デバッグ: 文字列の各文字をチェック
-    if (StrLen(delta) > 0) {
-        DebugLog("First char code: " . Ord(SubStr(delta, 1, 1)))
+    ; 既存の自動非表示タイマーをキャンセル
+    SetTimer AutoHideGold, 0
+
+    ; 既に動画が表示されている場合は、一度非表示にしてから再表示
+    if (IsVideoVisible) {
+        DebugLog("Video already visible - hiding first, then showing again")
+        SendGoldHotkey()  ; 1回目: 非表示
+        Sleep 200  ; 少し待つ
+        SendGoldHotkey()  ; 2回目: 表示
+    } else {
+        DebugLog("Video not visible - showing now")
+        SendGoldHotkey()  ; 表示
     }
 
-    ; 複数の方法でゴールドを検出
-    ; 方法1: マイナス記号があればゴールド（時間フォーマットも含む）
-    if (InStr(delta, "-")) {
-        isGold := true
-        reason := "Negative delta detected"
-    }
+    ; 動画が表示されている状態にする
+    IsVideoVisible := true
 
-    ; 方法2: 先頭がマイナス記号かチェック
-    if (SubStr(delta, 1, 1) == "-") {
-        isGold := true
-        reason := "Starts with minus"
-    }
+    ; 10秒後に自動的に非表示にする
+    SetTimer AutoHideGold, -AutoHideDelay
 
-    ; 方法3: Unicode のマイナス記号もチェック (U+2212)
-    if (InStr(delta, "−")) {
-        isGold := true
-        reason := "Unicode minus detected"
-    }
+    TrayTip "Gold Split!", "Video will auto-hide in 10 seconds`nDelta: " . delta, 1
 
-    DebugLog("Gold check: " . (isGold ? "YES - " . reason : "NO"))
-
-    if (isGold) {
-        DebugLog("!!! GOLD SPLIT DETECTED !!! Sending hotkey to OBS...")
-
-        global AutoHideDelay, IsVideoVisible
-
-        ; 既存の自動非表示タイマーをキャンセル
-        SetTimer AutoHideGold, 0
-
-        ; 既に動画が表示されている場合は、一度非表示にしてから再表示
-        if (IsVideoVisible) {
-            DebugLog("Video already visible - hiding first, then showing again")
-            SendGoldHotkey()  ; 1回目: 非表示
-            Sleep 200  ; 少し待つ
-            SendGoldHotkey()  ; 2回目: 表示
-        } else {
-            DebugLog("Video not visible - showing now")
-            SendGoldHotkey()  ; 表示
-        }
-
-        ; 動画が表示されている状態にする
-        IsVideoVisible := true
-
-        ; 10秒後に自動的に非表示にする
-        SetTimer AutoHideGold, -AutoHideDelay
-
-        TrayTip "Gold Split!", "Video will auto-hide in 10 seconds`n" . reason . "`nDelta: " . delta, 1
-
-        ; 音も鳴らす（設定で有効な場合のみ）
-        global PlayBeepSound
-        if (PlayBeepSound) {
-            SoundBeep 1000, 200
-        }
+    ; 音も鳴らす（設定で有効な場合のみ）
+    if (PlayBeepSound) {
+        SoundBeep 1000, 200
     }
 }
 
@@ -333,9 +311,9 @@ TestTCPConnection() {
         MsgBox info . "`n`n(Copied to clipboard!)", "Manual Test Results", 64
 
         if (delta != "") {
-            CheckForGoldSimple(delta, 0)
+            TriggerGoldAlert(delta)
         } else {
-            MsgBox "No data received from LiveSplit Server.`n`nMake sure:`n1. LiveSplit is running`n2. LiveSplit Server component is added to layout`n3. Port is set to 16834", "Connection Failed", 48
+            MsgBox "No data received from LiveSplit Server.`n`nMake sure:`n1. LiveSplit is running`n2. TCP Server is started (Right-click -> Control -> Start TCP Server)`n3. Port is set to 16834", "Connection Failed", 48
         }
     } catch as err {
         DebugLog("Test error: " . err.Message)
