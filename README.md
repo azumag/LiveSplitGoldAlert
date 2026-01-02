@@ -63,6 +63,7 @@ LiveSplitでゴールドスプリットを検出し、OBSに自動的にホッ�
 | `Ctrl+Alt+T` | 手動でゴールド検出テスト |
 | `Ctrl+Alt+V` | TCP接続テスト |
 | `Ctrl+Alt+H` | ホットキー送信テスト |
+| `Ctrl+Alt+B` | ビープ音のON/OFF切り替え |
 | `Ctrl+Alt+L` | デバッグログをメモ帳で開く |
 | `Ctrl+Alt+C` | デバッグログをクリア |
 | `Ctrl+Alt+D` | デバッグモードのON/OFF |
@@ -77,8 +78,11 @@ LiveSplitHost := "127.0.0.1"      ; LiveSplitのホスト
 LiveSplitPort := 16834             ; LiveSplitのポート
 CheckInterval := 2000              ; チェック間隔（ミリ秒）
 AutoHideDelay := 10000             ; 自動非表示までの時間（ミリ秒）
+PlayBeepSound := false             ; ビープ音を鳴らすか（デフォルト: OFF）
 DebugMode := true                  ; デバッグモード
 ```
+
+**注:** ビープ音は実行中に `Ctrl+Alt+B` で切り替えることもできます。
 
 ## トラブルシューティング
 

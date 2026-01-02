@@ -20,6 +20,7 @@ LastCheckTime := 0
 CachedSplitIndex := -1
 AutoHideDelay := 10000  ; 自動非表示までの時間（ミリ秒）- 10秒
 IsVideoVisible := false  ; 動画が表示されているか
+PlayBeepSound := false  ; ビープ音を鳴らすか
 
 ; 定期的にチェック
 SetTimer CheckGold, CheckInterval
@@ -226,8 +227,11 @@ CheckForGoldSimple(delta, splitIndex) {
 
         TrayTip "Gold Split!", "Video will auto-hide in 10 seconds`n" . reason . "`nDelta: " . delta, 1
 
-        ; 音も鳴らす
-        SoundBeep 1000, 200
+        ; 音も鳴らす（設定で有効な場合のみ）
+        global PlayBeepSound
+        if (PlayBeepSound) {
+            SoundBeep 1000, 200
+        }
     }
 }
 
@@ -344,6 +348,15 @@ TestTCPConnection() {
     global DebugMode
     DebugMode := !DebugMode
     DebugLog("Debug mode: " . (DebugMode ? "ON" : "OFF"))
+}
+
+; ビープ音の切り替え
+^!b:: {
+    global PlayBeepSound
+    PlayBeepSound := !PlayBeepSound
+    msg := "Beep sound: " . (PlayBeepSound ? "ON" : "OFF")
+    DebugLog(msg)
+    MsgBox msg, "Beep Sound Toggle", 64
 }
 
 ; ログファイルを開く
