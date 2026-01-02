@@ -14,7 +14,7 @@ LiveSplitでゴールドスプリットを検出し、OBSに自動的にホッ�
 
 - Windows 10/11
 - [AutoHotkey v2.0](https://www.autohotkey.com/)
-- [LiveSplit](https://livesplit.org/)
+- [LiveSplit 1.8.36](https://livesplit.org/) 以降
 - [OBS Studio](https://obsproject.com/)
 
 ## セットアップ
@@ -22,12 +22,9 @@ LiveSplitでゴールドスプリットを検出し、OBSに自動的にホッ�
 ### 1. LiveSplit設定
 
 1. LiveSplitを開く
-2. 右クリック → `Edit Layout...`
-3. `+` → `Control` → `LiveSplit Server` を追加
-4. `LiveSplit Server` をダブルクリックして設定
-5. `Server Port` を `16834` に設定
-6. `Start Server` にチェック
-7. `OK` で保存
+2. 右クリック → `Control` → `Start TCP Server`
+   - デフォルトでポート `16834` が使用されます
+   - サーバーが起動すると、メニューに `Stop TCP Server` と表示されます
 
 ### 2. OBS設定
 
