@@ -1,0 +1,9 @@
+# Debug logs
+debug.log
+
+# Temporary files
+*.tmp
+*.temp
+
+# AutoHotkey compiled files
+*.exe
