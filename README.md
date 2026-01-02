@@ -19,6 +19,9 @@ LiveSplitでゴールドスプリットを検出し、OBSに自動的にホッ�
 
 ## セットアップ
 
+### 0. AutoHotKey を導入
+- [AutoHotkey v2.0](https://www.autohotkey.com/)
+
 ### 1. LiveSplit設定
 
 1. LiveSplitを開く
