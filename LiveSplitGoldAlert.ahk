@@ -29,8 +29,6 @@ DebugLog(msg) {
     global DebugMode
     if (DebugMode) {
         OutputDebug msg
-        ToolTip msg
-        SetTimer () => ToolTip(), -3000  ; 3秒後に消す
 
         ; ファイルにもログを残す
         try {
