@@ -434,13 +434,6 @@ TestTCPConnection() {
     }
 }
 
-; デバッグモードの切り替え
-^!d:: {
-    global DebugMode
-    DebugMode := !DebugMode
-    DebugLog("Debug mode: " . (DebugMode ? "ON" : "OFF"))
-}
-
 ; ビープ音の切り替え
 ^!b:: {
     global PlayBeepSound
