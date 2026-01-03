@@ -12,8 +12,9 @@ if !A_IsAdmin {
 ; LiveSplit接続設定
 LiveSplitHost := "127.0.0.1"
 LiveSplitPort := 16834
-PreviousDelta := ""
-DebugMode := true  ; デバッグモード
+PreviousLastSplitTime := ""
+PreviousComparisonTime := ""
+DebugMode := false  ; デバッグモード（デフォルト: OFF）
 CheckInterval := 2000  ; チェック間隔（ミリ秒）- 2秒に1回
 LastCheckTime := 0
 AutoHideDelay := 10000  ; 自動非表示までの時間（ミリ秒）- 10秒
@@ -117,7 +118,7 @@ SendLiveSplitCommand(command) {
 }
 
 CheckGold() {
-    global PreviousDelta, LastCheckTime
+    global PreviousLastSplitTime, PreviousComparisonTime, LastCheckTime
 
     ; レート制限: 最後のチェックから500ms以内は何もしない
     currentTime := A_TickCount
@@ -127,55 +128,156 @@ CheckGold() {
     LastCheckTime := currentTime
 
     try {
-        ; デルタを直接取得（スプリットインデックスが取得できないため）
-        delta := SendLiveSplitCommand("getdelta")
+        ; スプリット完了を検出するため、最終スプリット時間（累積）を取得
+        lastSplitTime := SendLiveSplitCommand("getlastsplittime")
 
-        ; 初回起動時: PreviousDeltaを初期化するだけで終了
-        if (PreviousDelta == "") {
-            PreviousDelta := delta
-            DebugLog("Initial delta set: [" . delta . "]")
+        ; 初回起動時またはリセット後: 前回の時間を初期化するだけで終了
+        if (PreviousLastSplitTime == "" || lastSplitTime == "-") {
+            PreviousLastSplitTime := lastSplitTime
+            ; Best Segments比較から前回のベストセグメント累積時間を取得
+            bestSegmentTime := SendLiveSplitCommand("getcomparisonsplittime Best Segments")
+            PreviousComparisonTime := bestSegmentTime
+            DebugLog("Initial/Reset state - Last: [" . lastSplitTime . "], Best Segment: [" . bestSegmentTime . "]")
             return
         }
 
-        ; デルタが変わった場合（新しいスプリット）
-        if (delta != "" && delta != PreviousDelta) {
-            DebugLog("=== DELTA CHANGE DETECTED ===")
-            DebugLog("Previous: [" . PreviousDelta . "]")
-            DebugLog("Current:  [" . delta . "]")
+        ; 最終スプリット時間が変わった場合（新しいスプリット完了）
+        if (lastSplitTime != "" && lastSplitTime != PreviousLastSplitTime) {
+            DebugLog("=== NEW SPLIT DETECTED ===")
 
-            ; 重要: マイナスで始まり、かつ時刻形式がある場合のみゴールド判定
-            ; ハイフンだけ（"-"）や時刻形式がないものは無視
-            isNewNegative := (SubStr(delta, 1, 1) == "-" && StrLen(delta) > 1 && InStr(delta, ":"))
+            ; 少し待ってからBest Segments比較時間を取得
+            Sleep 200
+            bestSegmentTime := SendLiveSplitCommand("getcomparisonsplittime Best Segments")
 
-            DebugLog("isNewNegative: " . (isNewNegative ? "YES" : "NO") . " (length: " . StrLen(delta) . ")")
+            ; 現在のスプリットインデックスも取得してデバッグ
+            splitIndex := SendLiveSplitCommand("getcurrentsplitindex")
+            delta := SendLiveSplitCommand("getdelta")
 
-            ; デルタが変わって、新しい値がマイナスならゴールド判定
-            ; （前回がマイナスでも、新しいスプリットでマイナスなら2回目のゴールド）
-            if (isNewNegative) {
-                DebugLog(">>> GOLD SPLIT DETECTED! (delta is negative) <<<")
+            DebugLog("Split Index: [" . splitIndex . "], Delta: [" . delta . "]")
+            DebugLog("Previous Last Split:  [" . PreviousLastSplitTime . "]")
+            DebugLog("Current Last Split:   [" . lastSplitTime . "]")
+            DebugLog("Previous Best Segment: [" . PreviousComparisonTime . "]")
+            DebugLog("Current Best Segment:  [" . bestSegmentTime . "]")
 
-                ; 少し待ってから再度確認
-                Sleep 300
+            ; セグメントタイムを計算
+            ; 現在のセグメント = lastSplitTime - PreviousLastSplitTime
+            ; ベストセグメント = PreviousComparisonTime - PreviousLastSplitTime
+            ; ※Best Segments比較を使用することで、真のセグメントベストと比較できる
 
-                ; 再確認
-                delta2 := SendLiveSplitCommand("getdelta")
-                DebugLog("Re-check delta: [" . delta2 . "]")
+            if (lastSplitTime != "" && lastSplitTime != "-") {
 
-                if (delta2 == delta) {
-                    DebugLog("*** CONFIRMED GOLD - Triggering alert! ***")
-                    TriggerGoldAlert(delta)
+                ; 現在のセグメントタイム
+                if (PreviousLastSplitTime != "" && PreviousLastSplitTime != "-") {
+                    currentSegmentSeconds := ParseTimeToSeconds(lastSplitTime) - ParseTimeToSeconds(PreviousLastSplitTime)
                 } else {
-                    DebugLog("Delta changed during re-check - skipping")
+                    ; 最初のスプリット
+                    currentSegmentSeconds := ParseTimeToSeconds(lastSplitTime)
                 }
-            } else {
-                DebugLog("Delta changed but not gold (positive or invalid format)")
+
+                ; ベストセグメントタイム
+                ; PreviousComparisonTimeを使用（スプリット完了前のBest Segments累積値）
+                ; これにより、ゴールド取得後に更新されたBest Segmentsではなく、更新前の値で比較できる
+                if (PreviousComparisonTime != "" && PreviousComparisonTime != "-") {
+                    if (PreviousLastSplitTime != "" && PreviousLastSplitTime != "-") {
+                        ; 中間スプリット: ベストセグメント = PreviousComparisonTime - PreviousLastSplitTime
+                        bestSegmentSeconds := ParseTimeToSeconds(PreviousComparisonTime) - ParseTimeToSeconds(PreviousLastSplitTime)
+                    } else {
+                        ; 最初のスプリット: PreviousComparisonTimeがそのままベスト
+                        bestSegmentSeconds := ParseTimeToSeconds(PreviousComparisonTime)
+                    }
+
+                    DebugLog("Current Segment Time: " . Round(currentSegmentSeconds, 3) . " seconds")
+                    DebugLog("Best Segment Time:    " . Round(bestSegmentSeconds, 3) . " seconds")
+
+                    ; ゴールド判定: 現在のセグメントタイム < ベストセグメントタイム
+                    isGold := (currentSegmentSeconds < bestSegmentSeconds)
+                } else {
+                    ; Best Segmentデータなし
+                    DebugLog("No Best Segment data available - skipping gold check")
+                    isGold := false
+                }
+
+                DebugLog("Gold check: " . (isGold ? "YES - New segment best!" : "NO - Not a gold"))
+
+                if (isGold) {
+                    DebugLog(">>> GOLD SPLIT DETECTED! <<<")
+
+                    ; 再確認
+                    Sleep 100
+                    lastSplitTime2 := SendLiveSplitCommand("getlastsplittime")
+
+                    if (lastSplitTime2 == lastSplitTime) {
+                        DebugLog("*** CONFIRMED GOLD - Triggering alert! ***")
+                        improvement := bestSegmentSeconds - currentSegmentSeconds
+                        DebugLog("Improvement: " . Round(improvement, 3) . " seconds")
+                        TriggerGoldAlert("Segment: " . Round(currentSegmentSeconds, 2) . "s (Best: " . Round(bestSegmentSeconds, 2) . "s)")
+                    } else {
+                        DebugLog("Split time changed during re-check - skipping")
+                    }
+                }
             }
 
-            PreviousDelta := delta
+            ; 次のチェックのために現在の値を保存
+            PreviousLastSplitTime := lastSplitTime
+            PreviousComparisonTime := bestSegmentTime
         }
     } catch as err {
         ; エラーは無視（接続できない場合など）
     }
+}
+
+; 時刻文字列を比較（HH:MM:SS.mmm形式）
+; 戻り値: -1 (time1 < time2), 0 (equal), 1 (time1 > time2)
+CompareTime(time1, time2) {
+    ; マイナス符号を処理
+    sign1 := 1
+    sign2 := 1
+
+    if (SubStr(time1, 1, 1) == "-") {
+        sign1 := -1
+        time1 := SubStr(time1, 2)
+    }
+
+    if (SubStr(time2, 1, 1) == "-") {
+        sign2 := -1
+        time2 := SubStr(time2, 2)
+    }
+
+    ; 時刻を秒数に変換
+    seconds1 := ParseTimeToSeconds(time1) * sign1
+    seconds2 := ParseTimeToSeconds(time2) * sign2
+
+    if (seconds1 < seconds2) {
+        return -1
+    } else if (seconds1 > seconds2) {
+        return 1
+    } else {
+        return 0
+    }
+}
+
+; 時刻文字列を秒数に変換
+ParseTimeToSeconds(timeStr) {
+    ; HH:MM:SS.mmm または MM:SS.mmm または SS.mmm
+    parts := StrSplit(timeStr, ":")
+
+    if (parts.Length == 3) {
+        ; HH:MM:SS.mmm
+        hours := parts[1]
+        minutes := parts[2]
+        seconds := parts[3]
+        return (hours * 3600) + (minutes * 60) + seconds
+    } else if (parts.Length == 2) {
+        ; MM:SS.mmm
+        minutes := parts[1]
+        seconds := parts[2]
+        return (minutes * 60) + seconds
+    } else if (parts.Length == 1) {
+        ; SS.mmm
+        return parts[1]
+    }
+
+    return 0
 }
 
 ; ゴールドアラートをトリガー
@@ -272,11 +374,20 @@ TestTCPConnection() {
     return results
 }
 
-; 接続テスト
-^!v::TestTCPConnection()
+; 接続テスト（デバッグモード時のみ）
+^!v:: {
+    global DebugMode
+    if (DebugMode) {
+        TestTCPConnection()
+    }
+}
 
-; 手動でゴールド検出テスト
+; 手動でゴールド検出テスト（デバッグモード時のみ）
 ^!t:: {
+    global DebugMode
+    if (!DebugMode) {
+        return
+    }
     try {
         DebugLog("=== Manual test - getting current state ===")
 
@@ -284,12 +395,14 @@ TestTCPConnection() {
         delta := SendLiveSplitCommand("getdelta")
         lastSplit := SendLiveSplitCommand("getlastsplittime")
         comparison := SendLiveSplitCommand("getcomparisonsplittime")
+        bestSegment := SendLiveSplitCommand("getcomparisonsplittime Best Segments")
 
         info := (
             "Split Index: [" . splitIndex . "]`n"
             "Delta: [" . delta . "]`n"
             "Last Split Time: [" . lastSplit . "]`n"
-            "Comparison Time: [" . comparison . "]`n`n"
+            "Comparison Time (PB): [" . comparison . "]`n"
+            "Best Segment Time: [" . bestSegment . "]`n`n"
             "Delta Length: " . StrLen(delta) . "`n"
         )
 
@@ -337,8 +450,12 @@ TestTCPConnection() {
     MsgBox msg, "Beep Sound Toggle", 64
 }
 
-; ログファイルを開く
+; ログファイルを開く（デバッグモード時のみ）
 ^!l:: {
+    global DebugMode
+    if (!DebugMode) {
+        return
+    }
     logFile := A_ScriptDir . "\debug.log"
     if FileExist(logFile) {
         Run "notepad.exe `"" . logFile . "`""
@@ -347,8 +464,12 @@ TestTCPConnection() {
     }
 }
 
-; ログファイルをクリア
+; ログファイルをクリア（デバッグモード時のみ）
 ^!c:: {
+    global DebugMode
+    if (!DebugMode) {
+        return
+    }
     logFile := A_ScriptDir . "\debug.log"
     try {
         FileDelete logFile
@@ -358,8 +479,12 @@ TestTCPConnection() {
     }
 }
 
-; ホットキー送信テスト
+; ホットキー送信テスト（デバッグモード時のみ）
 ^!h:: {
+    global DebugMode
+    if (!DebugMode) {
+        return
+    }
     DebugLog("Testing hotkey send...")
 
     obsRunning := WinExist("ahk_exe obs64.exe")
