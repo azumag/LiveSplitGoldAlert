@@ -14,6 +14,9 @@ LiveSplitHost := "127.0.0.1"
 LiveSplitPort := 16834
 PreviousLastSplitTime := ""
 PreviousComparisonTime := ""
+PrevPrevComparisonTime := ""  ; 2つ前のBest Segments累積時間（セグメントベスト計算用）
+PreviousComparisonIndex := -1 ; PreviousComparisonTimeを取得したスプリットインデックス
+PrevPrevComparisonIndex := -1 ; PrevPrevComparisonTimeを取得したスプリットインデックス
 DebugMode := false  ; デバッグモード（デフォルト: OFF）
 CheckInterval := 2000  ; チェック間隔（ミリ秒）- 2秒に1回
 LastCheckTime := 0
@@ -116,7 +119,8 @@ SendLiveSplitCommand(command) {
 }
 
 CheckGold() {
-    global PreviousLastSplitTime, PreviousComparisonTime, LastCheckTime
+    global PreviousLastSplitTime, PreviousComparisonTime, PreviousComparisonIndex
+    global PrevPrevComparisonTime, PrevPrevComparisonIndex, LastCheckTime
 
     ; レート制限: 最後のチェックから500ms以内は何もしない
     currentTime := A_TickCount
@@ -129,18 +133,50 @@ CheckGold() {
         ; スプリット完了を検出するため、最終スプリット時間（累積）を取得
         lastSplitTime := SendLiveSplitCommand("getlastsplittime")
 
-        ; 初回起動時またはリセット後: 前回の時間を初期化するだけで終了
+        ; 初回起動時・リセット後・スプリット取り消し後: 前回の時間を初期化するだけで終了
         if (PreviousLastSplitTime == "" || lastSplitTime == "-") {
             PreviousLastSplitTime := lastSplitTime
             ; Best Segments比較から前回のベストセグメント累積時間を取得
             bestSegmentTime := SendLiveSplitCommand("getcomparisonsplittime Best Segments")
-            PreviousComparisonTime := bestSegmentTime
+            splitIndex := SendLiveSplitCommand("getsplitindex")
+            ; リセット時は履歴をクリア
+            PrevPrevComparisonTime := ""
+            PrevPrevComparisonIndex := -1
+            if (bestSegmentTime != "" && bestSegmentTime != "-" && IsInteger(splitIndex)) {
+                PreviousComparisonTime := bestSegmentTime
+                PreviousComparisonIndex := splitIndex
+            } else {
+                ; 比較データ・インデックスが読めない場合はクリアしておく（次の判定でスキップされる）
+                PreviousComparisonTime := ""
+                PreviousComparisonIndex := -1
+            }
             DebugLog("Initial/Reset state - Last: [" . lastSplitTime . "], Best Segment: [" . bestSegmentTime . "]")
             return
         }
 
         ; 最終スプリット時間が変わった場合（新しいスプリット完了）
         if (lastSplitTime != "" && lastSplitTime != PreviousLastSplitTime) {
+
+            ; スプリット取り消しなどで時間が逆戻りした場合は再初期化
+            ; （PreviousLastSplitTimeが "-" の初回スプリットでは判定しない）
+            if (PreviousLastSplitTime != "" && PreviousLastSplitTime != "-"
+                && ParseTimeToSeconds(lastSplitTime) < ParseTimeToSeconds(PreviousLastSplitTime)) {
+                DebugLog("=== UNDO SPLIT DETECTED (time regression) - re-initializing ===")
+                PreviousLastSplitTime := lastSplitTime
+                bestSegmentTime := SendLiveSplitCommand("getcomparisonsplittime Best Segments")
+                splitIndex := SendLiveSplitCommand("getsplitindex")
+                PrevPrevComparisonTime := ""
+                PrevPrevComparisonIndex := -1
+                if (bestSegmentTime != "" && bestSegmentTime != "-" && IsInteger(splitIndex)) {
+                    PreviousComparisonTime := bestSegmentTime
+                    PreviousComparisonIndex := splitIndex
+                } else {
+                    PreviousComparisonTime := ""
+                    PreviousComparisonIndex := -1
+                }
+                return
+            }
+
             DebugLog("=== NEW SPLIT DETECTED ===")
 
             ; 少し待ってからBest Segments比較時間を取得
@@ -148,7 +184,7 @@ CheckGold() {
             bestSegmentTime := SendLiveSplitCommand("getcomparisonsplittime Best Segments")
 
             ; 現在のスプリットインデックスも取得してデバッグ
-            splitIndex := SendLiveSplitCommand("getcurrentsplitindex")
+            splitIndex := SendLiveSplitCommand("getsplitindex")
             delta := SendLiveSplitCommand("getdelta")
 
             DebugLog("Split Index: [" . splitIndex . "], Delta: [" . delta . "]")
@@ -159,41 +195,48 @@ CheckGold() {
 
             ; セグメントタイムを計算
             ; 現在のセグメント = lastSplitTime - PreviousLastSplitTime
-            ; ベストセグメント = PreviousComparisonTime - PreviousLastSplitTime
-            ; ※Best Segments比較を使用することで、真のセグメントベストと比較できる
+            ; ベストセグメント = PreviousComparisonTime - PrevPrevComparisonTime
+            ; ※Best Segments比較の累積値同士の差から、真のセグメントベストを算出する
+            ; 読み取り失敗や途中起動で累積値が連続しない場合は判定をスキップする
 
-            if (lastSplitTime != "" && lastSplitTime != "-") {
+            ; splitIndexが読めない場合は判定できないため、スキップする
+            justCompletedIndex := -1
+            if (IsInteger(splitIndex)) {
+                justCompletedIndex := splitIndex - 1
+            }
 
-                ; 現在のセグメントタイム
-                if (PreviousLastSplitTime != "" && PreviousLastSplitTime != "-") {
-                    currentSegmentSeconds := ParseTimeToSeconds(lastSplitTime) - ParseTimeToSeconds(PreviousLastSplitTime)
-                } else {
-                    ; 最初のスプリット
-                    currentSegmentSeconds := ParseTimeToSeconds(lastSplitTime)
-                }
+            isFirstSplit := (
+                (PreviousLastSplitTime == "" || PreviousLastSplitTime == "-")
+                && (PreviousComparisonTime != "" && PreviousComparisonTime != "-")
+                && (justCompletedIndex == 0)
+                && (PreviousComparisonIndex == 0)
+            )
 
-                ; ベストセグメントタイム
-                ; PreviousComparisonTimeを使用（スプリット完了前のBest Segments累積値）
-                ; これにより、ゴールド取得後に更新されたBest Segmentsではなく、更新前の値で比較できる
-                if (PreviousComparisonTime != "" && PreviousComparisonTime != "-") {
-                    if (PreviousLastSplitTime != "" && PreviousLastSplitTime != "-") {
-                        ; 中間スプリット: ベストセグメント = PreviousComparisonTime - PreviousLastSplitTime
-                        bestSegmentSeconds := ParseTimeToSeconds(PreviousComparisonTime) - ParseTimeToSeconds(PreviousLastSplitTime)
-                    } else {
-                        ; 最初のスプリット: PreviousComparisonTimeがそのままベスト
-                        bestSegmentSeconds := ParseTimeToSeconds(PreviousComparisonTime)
-                    }
+            isMiddleSplit := (
+                !isFirstSplit
+                && (PreviousLastSplitTime != "" && PreviousLastSplitTime != "-")
+                && (PreviousComparisonTime != "" && PreviousComparisonTime != "-")
+                && (PrevPrevComparisonTime != "" && PrevPrevComparisonTime != "-")
+                && (PreviousComparisonIndex == justCompletedIndex)
+                && (PrevPrevComparisonIndex == justCompletedIndex - 1)
+            )
 
-                    DebugLog("Current Segment Time: " . Round(currentSegmentSeconds, 3) . " seconds")
-                    DebugLog("Best Segment Time:    " . Round(bestSegmentSeconds, 3) . " seconds")
+            if (isFirstSplit) {
+                ; 最初のスプリット: PreviousComparisonTime（B[0]）がそのままベスト
+                currentSegmentSeconds := ParseTimeToSeconds(lastSplitTime)
+                bestSegmentSeconds := ParseTimeToSeconds(PreviousComparisonTime)
+            } else if (isMiddleSplit) {
+                ; 中間スプリット: 累積値同士の差
+                currentSegmentSeconds := ParseTimeToSeconds(lastSplitTime) - ParseTimeToSeconds(PreviousLastSplitTime)
+                bestSegmentSeconds := ParseTimeToSeconds(PreviousComparisonTime) - ParseTimeToSeconds(PrevPrevComparisonTime)
+            }
 
-                    ; ゴールド判定: 現在のセグメントタイム < ベストセグメントタイム
-                    isGold := (currentSegmentSeconds < bestSegmentSeconds)
-                } else {
-                    ; Best Segmentデータなし
-                    DebugLog("No Best Segment data available - skipping gold check")
-                    isGold := false
-                }
+            if (isFirstSplit || isMiddleSplit) {
+                DebugLog("Current Segment Time: " . Round(currentSegmentSeconds, 3) . " seconds")
+                DebugLog("Best Segment Time:    " . Round(bestSegmentSeconds, 3) . " seconds")
+
+                ; ゴールド判定: 現在のセグメントタイム < ベストセグメントタイム
+                isGold := (currentSegmentSeconds < bestSegmentSeconds)
 
                 DebugLog("Gold check: " . (isGold ? "YES - New segment best!" : "NO - Not a gold"))
 
@@ -213,11 +256,19 @@ CheckGold() {
                         DebugLog("Split time changed during re-check - skipping")
                     }
                 }
+            } else {
+                DebugLog("No valid Best Segment data available - skipping gold check")
             }
 
             ; 次のチェックのために現在の値を保存
             PreviousLastSplitTime := lastSplitTime
-            PreviousComparisonTime := bestSegmentTime
+            ; 比較データ・インデックスが読めた場合のみシフトする（読めなかった場合は次回の判定でスキップされる）
+            if (bestSegmentTime != "" && bestSegmentTime != "-" && IsInteger(splitIndex)) {
+                PrevPrevComparisonTime := PreviousComparisonTime
+                PrevPrevComparisonIndex := PreviousComparisonIndex
+                PreviousComparisonTime := bestSegmentTime
+                PreviousComparisonIndex := splitIndex
+            }
         }
     } catch as err {
         ; エラーは無視（接続できない場合など）
@@ -305,7 +356,7 @@ TriggerGoldAlert(delta) {
     ; 10秒後に自動的に非表示にする
     SetTimer AutoHideGold, -AutoHideDelay
 
-    TrayTip "Gold Split!", "Video will auto-hide in 10 seconds`nDelta: " . delta, 1
+    TrayTip "Gold Split!", "Video will auto-hide in " . (AutoHideDelay // 1000) . " seconds`nDelta: " . delta, 1
 
     ; 音も鳴らす（設定で有効な場合のみ）
     if (PlayBeepSound) {
@@ -317,27 +368,12 @@ TriggerGoldAlert(delta) {
 SendGoldHotkey() {
     DebugLog("Sending gold hotkey to OBS...")
 
-    ; 複数の方法でホットキーを送信
+    ; トグル用ホットキーは1回だけ送信する
+    ; 複数回送信すると表示状態が反転してしまい、動画が表示されない
     try {
-        ; 方法1: SendPlay (ハードウェアレベルの送信 - 最も確実)
+        ; SendPlay（低レベル入力 - 権限レベルの違いに関わらず比較的安定）
         SendPlay "^+!g"
-        Sleep 100
-
-        ; 方法2: SendEvent (イベント方式)
-        SendEvent "^+!g"
-        Sleep 100
-
-        ; 方法3: SendInput (最速)
-        SendInput "^+!g"
-        Sleep 100
-
-        ; 方法4: PostMessage/SendMessage経由でOBSに直接送信
-        if WinExist("ahk_exe obs64.exe") {
-            ControlSend "^+!g", , "ahk_exe obs64.exe"
-            DebugLog("Sent via ControlSend to OBS")
-        }
-
-        DebugLog("Hotkey sent using multiple methods")
+        DebugLog("Hotkey sent via SendPlay")
     }
 }
 
@@ -355,7 +391,7 @@ AutoHideGold() {
 TestTCPConnection() {
     global LiveSplitHost, LiveSplitPort
 
-    commands := ["getcurrentsplitindex", "getdelta", "getlastsplittime", "getcurrenttime", "getfinaltime"]
+    commands := ["getsplitindex", "getdelta", "getlastsplittime", "getcurrenttime", "getfinaltime"]
     results := "Testing TCP connection to " . LiveSplitHost . ":" . LiveSplitPort . "`n`n"
 
     for index, cmd in commands {
@@ -389,7 +425,7 @@ TestTCPConnection() {
     try {
         DebugLog("=== Manual test - getting current state ===")
 
-        splitIndex := SendLiveSplitCommand("getcurrentsplitindex")
+        splitIndex := SendLiveSplitCommand("getsplitindex")
         delta := SendLiveSplitCommand("getdelta")
         lastSplit := SendLiveSplitCommand("getlastsplittime")
         comparison := SendLiveSplitCommand("getcomparisonsplittime")
@@ -493,30 +529,12 @@ TestTCPConnection() {
 
     Sleep 2000
 
-    ; 方法1: SendPlay
-    DebugLog("Sending via SendPlay...")
-    SendPlay "^+!g"
-    Sleep 200
-
-    ; 方法2: SendEvent
-    DebugLog("Sending via SendEvent...")
-    SendEvent "^+!g"
-    Sleep 200
-
-    ; 方法3: SendInput
-    DebugLog("Sending via SendInput...")
-    SendInput "^+!g"
-    Sleep 200
-
-    ; 方法4: ControlSend
-    if obsRunning {
-        DebugLog("Sending via ControlSend to OBS...")
-        ControlSend "^+!g", , "ahk_exe obs64.exe"
-        Sleep 200
-    }
+    ; 本番と同じ方法で1回だけ送信
+    DebugLog("Sending single hotkey (same as production)...")
+    SendGoldHotkey()
 
     SoundBeep 1500, 100
-    MsgBox "All methods tried!`n`nDid OBS receive any of them?`n`nIf not, try:`n1. Run this script as Administrator`n2. Check OBS hotkey settings`n3. Make sure OBS is not running as Admin", "Test Complete", 64
+    MsgBox "Hotkey sent once!`n`nDid OBS receive it?`n`nIf not, try:`n1. Run this script as Administrator`n2. Check OBS hotkey settings`n3. Make sure OBS is not running as Admin", "Test Complete", 64
 }
 
 ^!x::ExitApp

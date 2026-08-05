@@ -1,0 +1,65 @@
+name: Release Build
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download AutoHotkey v2 (pinned to v2.0.26)
+        shell: pwsh
+        run: |
+          # 再現性のためバージョンを固定（更新時はここを変更）
+          Invoke-WebRequest -Uri "https://github.com/AutoHotkey/AutoHotkey/releases/download/v2.0.26/AutoHotkey_2.0.26.zip" -OutFile "ahk-v2.zip"
+          Expand-Archive -Path "ahk-v2.zip" -DestinationPath "ahk"
+
+      - name: Download Ahk2Exe (pinned to Ahk2Exe1.1.37.02a2)
+        shell: pwsh
+        run: |
+          # 再現性のためバージョンを固定（更新時はここを変更）
+          Invoke-WebRequest -Uri "https://github.com/AutoHotkey/Ahk2Exe/releases/download/Ahk2Exe1.1.37.02a2/Ahk2Exe1.1.37.02a2.zip" -OutFile "ahk2exe.zip"
+          Expand-Archive -Path "ahk2exe.zip" -DestinationPath "ahk2exe"
+
+      - name: Compile to exe
+        shell: pwsh
+        run: |
+          $ws = $env:GITHUB_WORKSPACE
+          & "$ws\ahk2exe\Ahk2Exe.exe" /in "$ws\LiveSplitGoldAlert.ahk" /out "$ws\LiveSplitGoldAlert.exe" /base "$ws\ahk\AutoHotkey64.exe" /compress 0 /silent
+          if (-not (Test-Path "$ws\LiveSplitGoldAlert.exe")) { throw "Compilation failed: LiveSplitGoldAlert.exe not produced" }
+
+      - name: Create zip package
+        shell: pwsh
+        run: |
+          $ws = $env:GITHUB_WORKSPACE
+          Compress-Archive -Path "$ws\LiveSplitGoldAlert.exe", "$ws\LiveSplitGoldAlert.ahk", "$ws\README.md" -DestinationPath "$ws\LiveSplitGoldAlert-release.zip"
+
+      - name: Create GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          SHA_SHORT="${GITHUB_SHA:0:7}"
+          TAG="build-${SHA_SHORT}"
+          # 同じコミットで再実行された場合に備えて、同名のリリース/タグを削除してから作成
+          gh release delete "$TAG" --yes --cleanup-tag --repo "$GITHUB_REPOSITORY" 2>/dev/null || true
+          gh release create "$TAG" \
+            LiveSplitGoldAlert.exe \
+            LiveSplitGoldAlert-release.zip \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "Release build ${SHA_SHORT}" \
+            --notes "Auto-generated release build from commit ${SHA_SHORT} on main."
