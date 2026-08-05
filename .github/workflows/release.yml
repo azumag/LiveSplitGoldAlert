@@ -38,7 +38,9 @@ jobs:
         shell: pwsh
         run: |
           $ws = $env:GITHUB_WORKSPACE
-          & "$ws\ahk2exe\Ahk2Exe.exe" /in "$ws\LiveSplitGoldAlert.ahk" /out "$ws\LiveSplitGoldAlert.exe" /base "$ws\ahk\AutoHotkey64.exe" /compress 0 /silent
+          # Ahk2Exe.exe は GUI アプリのため `&` 呼び出しでは完了を待たない。Start-Process -Wait で待つ
+          $p = Start-Process -FilePath "$ws\ahk2exe\Ahk2Exe.exe" -ArgumentList '/in', "$ws\LiveSplitGoldAlert.ahk", '/out', "$ws\LiveSplitGoldAlert.exe", '/base', "$ws\ahk\AutoHotkey64.exe", '/compress', '0', '/silent' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "Ahk2Exe failed with exit code $($p.ExitCode)" }
           if (-not (Test-Path "$ws\LiveSplitGoldAlert.exe")) { throw "Compilation failed: LiveSplitGoldAlert.exe not produced" }
 
       - name: Create zip package
