@@ -142,11 +142,11 @@ CheckGold() {
             ; リセット時は履歴をクリア
             PrevPrevComparisonTime := ""
             PrevPrevComparisonIndex := -1
-            if (bestSegmentTime != "" && bestSegmentTime != "-") {
+            if (bestSegmentTime != "" && bestSegmentTime != "-" && IsInteger(splitIndex)) {
                 PreviousComparisonTime := bestSegmentTime
                 PreviousComparisonIndex := splitIndex
             } else {
-                ; 比較データが読めない場合はクリアしておく（次の判定でスキップされる）
+                ; 比較データ・インデックスが読めない場合はクリアしておく（次の判定でスキップされる）
                 PreviousComparisonTime := ""
                 PreviousComparisonIndex := -1
             }
@@ -167,7 +167,7 @@ CheckGold() {
                 splitIndex := SendLiveSplitCommand("getsplitindex")
                 PrevPrevComparisonTime := ""
                 PrevPrevComparisonIndex := -1
-                if (bestSegmentTime != "" && bestSegmentTime != "-") {
+                if (bestSegmentTime != "" && bestSegmentTime != "-" && IsInteger(splitIndex)) {
                     PreviousComparisonTime := bestSegmentTime
                     PreviousComparisonIndex := splitIndex
                 } else {
@@ -199,7 +199,11 @@ CheckGold() {
             ; ※Best Segments比較の累積値同士の差から、真のセグメントベストを算出する
             ; 読み取り失敗や途中起動で累積値が連続しない場合は判定をスキップする
 
-            justCompletedIndex := splitIndex - 1
+            ; splitIndexが読めない場合は判定できないため、スキップする
+            justCompletedIndex := -1
+            if (IsInteger(splitIndex)) {
+                justCompletedIndex := splitIndex - 1
+            }
 
             isFirstSplit := (
                 (PreviousLastSplitTime == "" || PreviousLastSplitTime == "-")
@@ -258,8 +262,8 @@ CheckGold() {
 
             ; 次のチェックのために現在の値を保存
             PreviousLastSplitTime := lastSplitTime
-            ; 比較データが読めた場合のみシフトする（読めなかった場合は次回の判定でスキップされる）
-            if (bestSegmentTime != "" && bestSegmentTime != "-") {
+            ; 比較データ・インデックスが読めた場合のみシフトする（読めなかった場合は次回の判定でスキップされる）
+            if (bestSegmentTime != "" && bestSegmentTime != "-" && IsInteger(splitIndex)) {
                 PrevPrevComparisonTime := PreviousComparisonTime
                 PrevPrevComparisonIndex := PreviousComparisonIndex
                 PreviousComparisonTime := bestSegmentTime

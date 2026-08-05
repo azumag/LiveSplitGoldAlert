@@ -20,19 +20,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Download AutoHotkey v2
+      - name: Download AutoHotkey v2 (pinned to v2.0.26)
         shell: pwsh
         run: |
-          Invoke-WebRequest -Uri "https://www.autohotkey.com/download/ahk-v2.zip" -OutFile "ahk-v2.zip"
+          # 再現性のためバージョンを固定（更新時はここを変更）
+          Invoke-WebRequest -Uri "https://github.com/AutoHotkey/AutoHotkey/releases/download/v2.0.26/AutoHotkey_2.0.26.zip" -OutFile "ahk-v2.zip"
           Expand-Archive -Path "ahk-v2.zip" -DestinationPath "ahk"
 
-      - name: Download Ahk2Exe
+      - name: Download Ahk2Exe (pinned to Ahk2Exe1.1.37.02a2)
         shell: pwsh
         run: |
-          $release = Invoke-RestMethod -Uri "https://api.github.com/repos/AutoHotkey/Ahk2Exe/releases/latest"
-          $asset = $release.assets | Where-Object { $_.name -like '*.zip' } | Select-Object -First 1
-          if (-not $asset) { throw "Ahk2Exe zip asset not found" }
-          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile "ahk2exe.zip"
+          # 再現性のためバージョンを固定（更新時はここを変更）
+          Invoke-WebRequest -Uri "https://github.com/AutoHotkey/Ahk2Exe/releases/download/Ahk2Exe1.1.37.02a2/Ahk2Exe1.1.37.02a2.zip" -OutFile "ahk2exe.zip"
           Expand-Archive -Path "ahk2exe.zip" -DestinationPath "ahk2exe"
 
       - name: Compile to exe
