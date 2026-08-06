@@ -370,11 +370,11 @@ SendGoldHotkey() {
 
     ; トグル用ホットキーは1回だけ送信する
     ; 複数回送信すると表示状態が反転してしまい、動画が表示されない
-    try {
-        ; SendPlay（低レベル入力 - 権限レベルの違いに関わらず比較的安定）
-        SendPlay "^+!g"
-        DebugLog("Hotkey sent via SendPlay")
-    }
+    ; Send（SendInput）で送信する
+    ; OBSのホットキーはGetAsyncKeyStateのポーリングで検出されるため、
+    ; SendPlay（WM_KEYDOWNメッセージ直送）ではOSのキー状態が更新されずOBSに届かない
+    Send "^+!g"
+    DebugLog("Hotkey sent via Send")
 }
 
 ; 自動非表示タイマー
