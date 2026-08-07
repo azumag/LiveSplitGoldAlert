@@ -37,14 +37,15 @@ LiveSplitでゴールドスプリットを検出し、OBS WebSocket API経由で
 2. `ツール` → `obs-websocket設定` を開く
    - `WebSocketサーバーを有効にする` にチェック（ポートはデフォルトの `4455`）
    - パスワードを確認・メモする（デフォルトで自動生成されています）
-3. スクリプト上部の設定にシーン名・ソース名を記入
-   - `OBSPassword`: 手順2で確認したパスワード
-   - `OBSSceneName`: ゴールド動画ソースが配置されているシーン名
-   - `OBSSourceName`: 表示/非表示を切り替えるソース名
+3. `LiveSplitGoldAlert.ini`（exeと同じフォルダ）をメモ帳で開き、設定を記入
+   - `[OBS]` セクションの `Password`: 手順2で確認したパスワード
+   - `SceneName`: ゴールド動画ソースが配置されているシーン名
+   - `SourceName`: 表示/非表示を切り替えるソース名
+   - UTF-8で保存（日本語のシーン名/ソース名もOK）
 
 ### 3. スクリプト実行
 
-1. `LiveSplitGoldAlert.ahk` をダブルクリック
+1. `LiveSplitGoldAlert.exe` または `LiveSplitGoldAlert.ahk` をダブルクリック
 2. 管理者権限での実行を許可
 3. スクリプトがバックグラウンドで動作開始
 
@@ -71,7 +72,7 @@ LiveSplitでゴールドスプリットを検出し、OBS WebSocket API経由で
 
 ### デバッグモード時のみ有効なホットキー
 
-スクリプト内の`DebugMode`を`true`に設定すると、以下のテスト用ホットキーが有効になります：
+INIの`[General]`セクションの`DebugMode`を`true`に設定すると、以下のテスト用ホットキーが有効になります：
 
 | ホットキー | 機能 |
 |-----------|------|
@@ -83,23 +84,37 @@ LiveSplitでゴールドスプリットを検出し、OBS WebSocket API経由で
 
 ## 設定変更
 
-スクリプト上部で以下の設定を変更できます：
+設定は exe と同じフォルダの `LiveSplitGoldAlert.ini` で変更できます（無い場合は初期値が使われます）：
 
-```ahk
-LiveSplitHost := "127.0.0.1"      ; LiveSplitのホスト
-LiveSplitPort := 16834             ; LiveSplitのポート
-OBSHost := "127.0.0.1"             ; OBS WebSocketのホスト
-OBSPort := 4455                    ; OBS WebSocketのポート
-OBSPassword := "password"          ; obs-websocket設定のパスワード
-OBSSceneName := "Game"             ; 動画が置かれているシーン名
-OBSSourceName := "GoldVideo"       ; ゴールド動画ソース名
-CheckInterval := 2000              ; チェック間隔（ミリ秒）
-AutoHideDelay := 10000             ; 自動非表示までの時間（ミリ秒）
-PlayBeepSound := false             ; ビープ音を鳴らすか（デフォルト: OFF）
-DebugMode := false                 ; デバッグモード（デフォルト: OFF）
+```ini
+[LiveSplit]
+Host = 127.0.0.1
+Port = 16834
+
+[OBS]
+Host = 127.0.0.1
+Port = 4455
+; obs-websocket設定のパスワード
+Password = password
+; 動画が置かれているシーン名
+SceneName = Game
+; ゴールド動画ソース名
+SourceName = GoldVideo
+
+[General]
+; チェック間隔（ミリ秒）
+CheckInterval = 2000
+; 自動非表示までの時間（ミリ秒）
+AutoHideDelay = 10000
+; ビープ音を鳴らすか
+PlayBeepSound = false
+; デバッグモード
+DebugMode = false
 ```
 
-**注:** ビープ音は実行中に `Ctrl+Alt+B` で切り替えることもできます
+- 設定変更後はスクリプトを再起動してください
+- ファイルが無い場合は、リリースに同梱の `LiveSplitGoldAlert.ini` をコピーしてください
+- **注:** ビープ音は実行中に `Ctrl+Alt+B` で切り替えることもできます
 
 ## 仕組み
 
@@ -127,20 +142,20 @@ DebugMode := false                 ; デバッグモード（デフォルト: OF
 ### ゴールドが検出されない
 
 1. LiveSplit Serverが起動しているか確認
-   - スクリプト内の`DebugMode := true`に変更して `Ctrl+Alt+V` でテスト可能
+   - INIの`[General]`の`DebugMode`を`true`に設定して `Ctrl+Alt+V` でテスト可能
 2. ポート番号が `16834` になっているか確認
 3. LiveSplitにBest Segmentsデータが存在するか確認
    - 最低1回は完走している必要があります
 4. デバッグログを確認
-   - スクリプト内の`DebugMode := true`に変更して `Ctrl+Alt+L` でログを開く
+   - INIの`[General]`の`DebugMode`を`true`に設定して `Ctrl+Alt+L` でログを開く
 
 ### OBS側で動画が表示されない
 
 1. OBS 28以上で実行しているか確認（それ以前はWebSocketプラグインの導入が必要）
 2. `ツール` → `obs-websocket設定` でサーバーが有効になっているか確認
-3. スクリプト内の`OBSPassword` / `OBSSceneName` / `OBSSourceName` が正しいか確認
+3. `LiveSplitGoldAlert.ini` の `Password` / `SceneName` / `SourceName` が正しいか確認
 4. WebSocket接続テスト
-   - スクリプト内の`DebugMode := true`に変更して `Ctrl+Alt+H` でテスト可能
+   - INIの`[General]`の`DebugMode`を`true`に設定して `Ctrl+Alt+H` でテスト可能
 
 ### 動画が自動的に消えない
 

@@ -33,6 +33,11 @@ AutoHideDelay := 10000  ; 自動非表示までの時間（ミリ秒）- 10秒
 IsVideoVisible := false  ; 動画が表示されているか
 PlayBeepSound := false  ; ビープ音を鳴らすか
 
+; 設定ファイル（exeと同じフォルダの LiveSplitGoldAlert.ini）から設定を読み込む
+; INIファイルが無い場合は上記のデフォルト値が使われる
+ConfigFile := A_ScriptDir . "\LiveSplitGoldAlert.ini"
+LoadConfig()
+
 ; 定期的にチェック
 SetTimer CheckGold, CheckInterval
 
@@ -49,6 +54,82 @@ DebugLog(msg) {
             FileAppend timestamp . " | " . msg . "`n", logFile
         }
     }
+}
+
+; 設定ファイルから設定を読み込む（INI形式・UTF-8対応）
+; ファイルが無い場合はスクリプト上部のデフォルト値がそのまま使われる
+LoadConfig() {
+    global ConfigFile, LiveSplitHost, LiveSplitPort, OBSHost, OBSPort
+    global OBSPassword, OBSSceneName, OBSSourceName
+    global CheckInterval, AutoHideDelay, PlayBeepSound, DebugMode
+
+    if !FileExist(ConfigFile) {
+        return
+    }
+
+    try {
+        content := FileRead(ConfigFile, "UTF-8")
+    } catch {
+        DebugLog("Config: could not read " . ConfigFile)
+        return
+    }
+
+    section := ""
+    for line in StrSplit(content, "`n", "`r") {
+        line := Trim(line)
+        ; 空行・コメント行はスキップ
+        if (line == "" || SubStr(line, 1, 1) == ";" || SubStr(line, 1, 1) == "#") {
+            continue
+        }
+        ; セクション行
+        if (SubStr(line, 1, 1) == "[" && SubStr(line, -1) == "]") {
+            section := Trim(SubStr(line, 2, -2))
+            continue
+        }
+        ; キー=値
+        eqPos := InStr(line, "=")
+        if (eqPos == 0) {
+            continue
+        }
+        key := Trim(SubStr(line, 1, eqPos - 1))
+        value := Trim(SubStr(line, eqPos + 1))
+
+        if (section == "OBS") {
+            switch key, false {
+                case "Host": OBSHost := value
+                case "Port":
+                    if IsInteger(value) {
+                        OBSPort := Integer(value)
+                    }
+                case "Password": OBSPassword := value
+                case "SceneName": OBSSceneName := value
+                case "SourceName": OBSSourceName := value
+            }
+        } else if (section == "LiveSplit") {
+            switch key, false {
+                case "Host": LiveSplitHost := value
+                case "Port":
+                    if IsInteger(value) {
+                        LiveSplitPort := Integer(value)
+                    }
+            }
+        } else if (section == "General") {
+            switch key, false {
+                case "CheckInterval":
+                    if IsInteger(value) {
+                        CheckInterval := Integer(value)
+                    }
+                case "AutoHideDelay":
+                    if IsInteger(value) {
+                        AutoHideDelay := Integer(value)
+                    }
+                case "PlayBeepSound": PlayBeepSound := (StrLower(value) == "true" || value == "1")
+                case "DebugMode": DebugMode := (StrLower(value) == "true" || value == "1")
+            }
+        }
+    }
+
+    DebugLog("Config loaded from " . ConfigFile)
 }
 
 ; LiveSplitにTCPソケット経由でコマンドを送信（PowerShell経由）
@@ -659,7 +740,7 @@ TestTCPConnection() {
     }
 
     if (OBSSceneName == "" || OBSSourceName == "") {
-        MsgBox "OBSSceneName / OBSSourceName が未設定です。`nスクリプト上部で設定してください。", "OBS WebSocket Test", 48
+        MsgBox "OBSSceneName / OBSSourceName が未設定です。`nLiveSplitGoldAlert.ini で設定してください。", "OBS WebSocket Test", 48
         return
     }
 
@@ -676,7 +757,7 @@ TestTCPConnection() {
         "- Hide: " . (hideOk ? "OK" : "FAILED") . "`n`n"
         "If FAILED, check:`n"
         "1. OBS ツール → obs-websocket設定 でサーバーが有効か`n"
-        "2. OBSPassword / OBSSceneName / OBSSourceName の設定`n"
+        "2. LiveSplitGoldAlert.ini の Password / SceneName / SourceName の設定`n"
         "3. デバッグログ (Ctrl+Alt+L) で詳細を確認"
     )
 

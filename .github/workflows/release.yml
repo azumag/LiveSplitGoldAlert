@@ -47,7 +47,7 @@ jobs:
         shell: pwsh
         run: |
           $ws = $env:GITHUB_WORKSPACE
-          Compress-Archive -Path "$ws\LiveSplitGoldAlert.exe", "$ws\LiveSplitGoldAlert.ahk", "$ws\README.md" -DestinationPath "$ws\LiveSplitGoldAlert-release.zip"
+          Compress-Archive -Path "$ws\LiveSplitGoldAlert.exe", "$ws\LiveSplitGoldAlert.ahk", "$ws\LiveSplitGoldAlert.ini", "$ws\README.md" -DestinationPath "$ws\LiveSplitGoldAlert-release.zip"
 
       - name: Create GitHub Release
         shell: bash
