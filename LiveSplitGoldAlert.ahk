@@ -12,6 +12,15 @@ if !A_IsAdmin {
 ; LiveSplit接続設定
 LiveSplitHost := "127.0.0.1"
 LiveSplitPort := 16834
+
+; OBS WebSocket接続設定（OBS 28以降に標準内蔵）
+; 有効化: OBS → ツール → obs-websocket設定 → サーバーを有効化し、パスワードを確認する
+OBSHost := "127.0.0.1"
+OBSPort := 4455
+OBSPassword := ""      ; obs-websocket設定で表示されるパスワード
+OBSSceneName := ""     ; ゴールド動画ソースが配置されているシーン名
+OBSSourceName := ""    ; 表示/非表示を切り替えるソース名
+
 PreviousLastSplitTime := ""
 PreviousComparisonTime := ""
 PrevPrevComparisonTime := ""  ; 2つ前のBest Segments累積時間（セグメントベスト計算用）
@@ -115,6 +124,139 @@ SendLiveSplitCommand(command) {
     } catch as err {
         DebugLog("Command error: " . err.Message)
         return ""
+    }
+}
+
+; OBS WebSocket経由でソースの表示/非表示を直接制御（PowerShell経由）
+; 戻り値: 成功ならtrue、失敗ならfalse
+SendOBSCommand(enabled) {
+    global OBSHost, OBSPort, OBSPassword, OBSSceneName, OBSSourceName
+
+    DebugLog("OBS WebSocket: setting [" . OBSSourceName . "] enabled=" . (enabled ? "true" : "false"))
+
+    ; セキュリティ: 入力検証（ホストは127.0.0.1またはlocalhostのみ許可）
+    if (OBSHost != "127.0.0.1" && OBSHost != "localhost") {
+        DebugLog("Security: Invalid OBS host rejected: " . OBSHost)
+        return false
+    }
+
+    ; ポートは1-65535の数値のみ許可
+    if (!IsInteger(OBSPort) || OBSPort < 1 || OBSPort > 65535) {
+        DebugLog("Security: Invalid OBS port rejected: " . OBSPort)
+        return false
+    }
+
+    ; シーン名・ソース名が未設定の場合はホットキーにフォールバック
+    if (OBSSceneName == "" || OBSSourceName == "") {
+        DebugLog("OBS WebSocket: scene/source name not configured - falling back to hotkey")
+        SendGoldHotkey()
+        return false
+    }
+
+    ; 値は環境変数経由で渡す（引用符エスケープ問題を回避）
+    EnvSet "OBS_WS_HOST", OBSHost
+    EnvSet "OBS_WS_PORT", OBSPort
+    EnvSet "OBS_WS_PASSWORD", OBSPassword
+    EnvSet "OBS_WS_SCENE", OBSSceneName
+    EnvSet "OBS_WS_SOURCE", OBSSourceName
+    EnvSet "OBS_WS_ENABLED", enabled ? "true" : "false"
+
+    psScript := "
+(
+$ErrorActionPreference = 'Stop'
+try {
+    $host_ = $env:OBS_WS_HOST
+    $port = $env:OBS_WS_PORT
+    $password = $env:OBS_WS_PASSWORD
+    $scene = $env:OBS_WS_SCENE
+    $source = $env:OBS_WS_SOURCE
+    $enabled = ($env:OBS_WS_ENABLED -eq 'true')
+    $ws = New-Object System.Net.WebSockets.ClientWebSocket
+    $uri = [Uri]('ws://' + $host_ + ':' + $port)
+    $recvBuf = New-Object byte[] 65536
+    function Await-Task($task, $timeoutMs, $timeoutMsg) {
+        try {
+            if (-not $task.Wait($timeoutMs)) { throw $timeoutMsg }
+            return $task.GetAwaiter().GetResult()
+        } catch [System.AggregateException] {
+            throw $_.Exception.InnerException
+        }
+    }
+    function Receive-Json {
+        $sb = New-Object System.Text.StringBuilder
+        do {
+            $r = Await-Task $ws.ReceiveAsync([ArraySegment[byte]]::new($recvBuf), [Threading.CancellationToken]::None) 5000 'Timeout waiting for response from OBS'
+            if ($r.MessageType -eq [Net.WebSockets.WebSocketMessageType]::Close) { throw 'Connection closed by server' }
+            [void]$sb.Append([Text.Encoding]::UTF8.GetString($recvBuf, 0, $r.Count))
+        } while (-not $r.EndOfMessage)
+        return ($sb.ToString() | ConvertFrom-Json)
+    }
+    function Send-Json($obj) {
+        $json = $obj | ConvertTo-Json -Compress -Depth 10
+        $bytes = [Text.Encoding]::UTF8.GetBytes($json)
+        [void](Await-Task $ws.SendAsync([ArraySegment[byte]]::new($bytes), [Net.WebSockets.WebSocketMessageType]::Text, $true, [Threading.CancellationToken]::None) 5000 'Timeout sending to OBS')
+    }
+    [void](Await-Task $ws.ConnectAsync($uri, [Threading.CancellationToken]::None) 5000 'Timeout connecting to OBS')
+    $hello = Receive-Json
+    if ($hello.op -ne 0) { throw 'Unexpected message, expected Hello (op 0)' }
+    $identify = @{ op = 1; d = @{ rpcVersion = 1; eventSubscriptions = 0 } }
+    if ($hello.d.authentication) {
+        $sha = [Security.Cryptography.SHA256]::Create()
+        $secret = [Convert]::ToBase64String($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($password + $hello.d.authentication.salt)))
+        $auth = [Convert]::ToBase64String($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($secret + $hello.d.authentication.challenge)))
+        $identify.d.authentication = $auth
+    }
+    Send-Json $identify
+    $identified = Receive-Json
+    if ($identified.op -ne 2) { throw 'Identification failed (op ' + $identified.op + ')' }
+    $reqGet = @{ op = 6; d = @{ requestType = 'GetSceneItemId'; requestId = 'gold1'; requestData = @{ sceneName = $scene; sourceName = $source } } }
+    Send-Json $reqGet
+    $resGet = Receive-Json
+    if (-not $resGet.d.requestStatus.result) { throw 'GetSceneItemId failed: code ' + $resGet.d.requestStatus.code }
+    $sceneItemId = $resGet.d.responseData.sceneItemId
+    $reqSet = @{ op = 6; d = @{ requestType = 'SetSceneItemEnabled'; requestId = 'gold2'; requestData = @{ sceneName = $scene; sceneItemId = $sceneItemId; sceneItemEnabled = $enabled } } }
+    Send-Json $reqSet
+    $resSet = Receive-Json
+    if (-not $resSet.d.requestStatus.result) { throw 'SetSceneItemEnabled failed: code ' + $resSet.d.requestStatus.code }
+    $ws.Dispose()
+    Write-Output 'OK'
+} catch {
+    Write-Output ('ERR: ' + $_.Exception.Message)
+}
+)"
+
+    ; UTF-8 BOM付きで保存（PowerShell 5.1はBOMなしUTF-8をANSIと解釈するため）
+    tempFile := A_Temp . "\obs_ws.ps1"
+    try {
+        file := FileOpen(tempFile, "w", "UTF-8")
+        file.Write(psScript)
+        file.Close()
+
+        outputFile := A_Temp . "\obs_ws_output.txt"
+        cmdLine := "powershell.exe -WindowStyle Hidden -ExecutionPolicy Bypass -NoProfile -Command `"& '" . tempFile . "' | Out-File -Encoding UTF8 '" . outputFile . "'`""
+        shell := ComObject("WScript.Shell")
+        shell.Run(cmdLine, 0, true)
+
+        if FileExist(outputFile) {
+            outputFileObj := FileOpen(outputFile, "r")
+            output := outputFileObj.Read()
+            outputFileObj.Close()
+            FileDelete(outputFile)
+
+            result := (Trim(output, "`r`n `t") == "OK")
+            if (result) {
+                DebugLog("OBS WebSocket: OK")
+            } else {
+                DebugLog("OBS WebSocket failed: " . Trim(output, "`r`n `t"))
+            }
+            return result
+        }
+
+        DebugLog("OBS WebSocket: no response")
+        return false
+    } catch as err {
+        DebugLog("OBS WebSocket error: " . err.Message)
+        return false
     }
 }
 
@@ -331,7 +473,7 @@ ParseTimeToSeconds(timeStr) {
 
 ; ゴールドアラートをトリガー
 TriggerGoldAlert(delta) {
-    DebugLog("!!! GOLD SPLIT DETECTED !!! Sending hotkey to OBS...")
+    DebugLog("!!! GOLD SPLIT DETECTED !!! Showing video in OBS...")
     DebugLog("Delta: [" . delta . "]")
 
     global AutoHideDelay, IsVideoVisible, PlayBeepSound
@@ -342,12 +484,14 @@ TriggerGoldAlert(delta) {
     ; 既に動画が表示されている場合は、一度非表示にしてから再表示
     if (IsVideoVisible) {
         DebugLog("Video already visible - hiding first, then showing again")
-        SendGoldHotkey()  ; 1回目: 非表示
+        SendOBSCommand(false)  ; 1回目: 非表示
         Sleep 200  ; 少し待つ
-        SendGoldHotkey()  ; 2回目: 表示
-    } else {
-        DebugLog("Video not visible - showing now")
-        SendGoldHotkey()  ; 表示
+    }
+
+    ; 表示（WebSocketが失敗した場合はホットキーにフォールバック）
+    if (!SendOBSCommand(true)) {
+        DebugLog("OBS WebSocket show failed - falling back to hotkey")
+        SendGoldHotkey()
     }
 
     ; 動画が表示されている状態にする
@@ -364,9 +508,9 @@ TriggerGoldAlert(delta) {
     }
 }
 
-; ホットキーを送信する関数
+; ホットキーを送信する関数（OBS WebSocketが使えない場合のフォールバック）
 SendGoldHotkey() {
-    DebugLog("Sending gold hotkey to OBS...")
+    DebugLog("Sending gold hotkey to OBS... (fallback)")
 
     ; トグル用ホットキーは1回だけ送信する
     ; 複数回送信すると表示状態が反転してしまい、動画が表示されない
@@ -383,7 +527,7 @@ AutoHideGold() {
     global IsVideoVisible
 
     DebugLog("Auto-hiding gold video after 10 seconds...")
-    SendGoldHotkey()
+    SendOBSCommand(false)
     IsVideoVisible := false  ; 動画を非表示にした
     DebugLog("Auto-hide complete")
 }
@@ -507,35 +651,36 @@ TestTCPConnection() {
     }
 }
 
-; ホットキー送信テスト（デバッグモード時のみ）
+; OBS WebSocket接続テスト（デバッグモード時のみ）
 ^!h:: {
-    global DebugMode
+    global DebugMode, OBSSceneName, OBSSourceName
     if (!DebugMode) {
         return
     }
-    DebugLog("Testing hotkey send...")
 
-    obsRunning := WinExist("ahk_exe obs64.exe")
-    isAdmin := A_IsAdmin ? "YES" : "NO"
+    if (OBSSceneName == "" || OBSSourceName == "") {
+        MsgBox "OBSSceneName / OBSSourceName が未設定です。`nスクリプト上部で設定してください。", "OBS WebSocket Test", 48
+        return
+    }
+
+    DebugLog("Testing OBS WebSocket (show)...")
+
+    showOk := SendOBSCommand(true)
+    Sleep 2000
+    DebugLog("Testing OBS WebSocket (hide)...")
+    hideOk := SendOBSCommand(false)
 
     msg := (
-        "Press OK, then the hotkey will be sent in 2 seconds.`n`n"
-        "Status:`n"
-        "- Running as Admin: " . isAdmin . "`n"
-        "- OBS Detected: " . (obsRunning ? "YES" : "NO") . "`n`n"
-        "Make sure OBS is open and check if the hotkey is received."
+        "OBS WebSocket test result:`n"
+        "- Show: " . (showOk ? "OK" : "FAILED") . "`n"
+        "- Hide: " . (hideOk ? "OK" : "FAILED") . "`n`n"
+        "If FAILED, check:`n"
+        "1. OBS ツール → obs-websocket設定 でサーバーが有効か`n"
+        "2. OBSPassword / OBSSceneName / OBSSourceName の設定`n"
+        "3. デバッグログ (Ctrl+Alt+L) で詳細を確認"
     )
 
-    MsgBox msg, "Hotkey Test", 64
-
-    Sleep 2000
-
-    ; 本番と同じ方法で1回だけ送信
-    DebugLog("Sending single hotkey (same as production)...")
-    SendGoldHotkey()
-
-    SoundBeep 1500, 100
-    MsgBox "Hotkey sent once!`n`nDid OBS receive it?`n`nIf not, try:`n1. Run this script as Administrator`n2. Check OBS hotkey settings`n3. Make sure OBS is not running as Admin", "Test Complete", 64
+    MsgBox msg, "OBS WebSocket Test", 64
 }
 
 ^!x::ExitApp
