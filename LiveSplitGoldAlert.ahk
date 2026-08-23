@@ -443,9 +443,13 @@ $ErrorActionPreference = 'Stop'
 try {
     [xml]$xml = Get-Content -LiteralPath $env:LIVESPLIT_SPLITS_PATH -Raw
     $segments = @($xml.Run.Segments.Segment)
+    $durations = @()
     for ($i = 0; $i -lt $segments.Count; $i++) {
         $best = $segments[$i].BestSegmentTime
-        if ($null -eq $best) { continue }
+        if ($null -eq $best) {
+            Write-Output 'ERR: incomplete Best Segment data'
+            return
+        }
         $realTime = $best.SelectSingleNode('./RealTime')
         $gameTime = $best.SelectSingleNode('./GameTime')
         $duration = ''
@@ -454,9 +458,16 @@ try {
         } elseif ($gameTime -and -not [string]::IsNullOrWhiteSpace($gameTime.InnerText)) {
             $duration = $gameTime.InnerText
         }
-        if ([string]::IsNullOrWhiteSpace($duration)) { continue }
-        $seconds = [System.Xml.XmlConvert]::ToTimeSpan($duration).TotalSeconds
-        Write-Output ('B' + $i + '=' + $seconds)
+        if ([string]::IsNullOrWhiteSpace($duration)) {
+            Write-Output 'ERR: incomplete Best Segment data'
+            return
+        }
+        $durations += [System.Xml.XmlConvert]::ToTimeSpan($duration).TotalSeconds
+    }
+    $cumulative = 0
+    for ($i = 0; $i -lt $durations.Count; $i++) {
+        $cumulative += $durations[$i]
+        Write-Output ('B' + $i + '=' + $cumulative.ToString([System.Globalization.CultureInfo]::InvariantCulture))
     }
 } catch {
     Write-Output ('ERR: ' + $_.Exception.Message)
@@ -506,9 +517,8 @@ try {
 
         ; パース成功時だけ入れ替える。失敗時に現在の監視スナップショットを失わない。
         if (!hasParseError) {
+            BestSegmentSnapshots.Clear()
             if (splitsPath != LoadedSplitsPath) {
-                ; splitsファイルが変わった場合は、前のゲーム用スナップショットを使わない
-                BestSegmentSnapshots.Clear()
                 LoadedSplitsPath := splitsPath
             }
 
