@@ -22,10 +22,9 @@ OBSSceneName := ""     ; ゴールド動画ソースが配置されているシ�
 OBSSourceName := ""    ; 表示/非表示を切り替えるソース名
 
 PreviousLastSplitTime := ""
-PreviousComparisonTime := ""
-PrevPrevComparisonTime := ""  ; 2つ前のBest Segments累積時間（セグメントベスト計算用）
-PreviousComparisonIndex := -1 ; PreviousComparisonTimeを取得したスプリットインデックス
-PrevPrevComparisonIndex := -1 ; PrevPrevComparisonTimeを取得したスプリットインデックス
+BestSegmentSnapshots := Map() ; スプリット完了前に取得したBest Segments累積時間
+LastSplitsSnapshotAttempt := 0
+LoadedSplitsPath := ""
 DebugMode := false  ; デバッグモード（デフォルト: OFF）
 CheckInterval := 2000  ; チェック間隔（ミリ秒）- 2秒に1回
 LastCheckTime := 0
@@ -37,6 +36,7 @@ PlayBeepSound := false  ; ビープ音を鳴らすか
 ; INIファイルが無い場合は上記のデフォルト値が使われる
 ConfigFile := A_ScriptDir . "\LiveSplitGoldAlert.ini"
 LoadConfig()
+ValidateStartupConfig()
 
 ; 定期的にチェック
 SetTimer CheckGold, CheckInterval
@@ -132,41 +132,65 @@ LoadConfig() {
     DebugLog("Config loaded from " . ConfigFile)
 }
 
-; LiveSplitにTCPソケット経由でコマンドを送信（PowerShell経由）
-SendLiveSplitCommand(command) {
+; 複数のLiveSplitコマンドを同一TCPセッションで送信し、応答を配列で返す
+SendLiveSplitCommands(commands) {
     global LiveSplitHost, LiveSplitPort
+
+    results := []
+    for index, command in commands {
+        results.Push("")
+    }
 
     ; セキュリティ: 入力検証
     ; ホストは127.0.0.1またはlocalhostのみ許可
     if (LiveSplitHost != "127.0.0.1" && LiveSplitHost != "localhost") {
         DebugLog("Security: Invalid host rejected: " . LiveSplitHost)
-        return ""
+        return results
     }
 
     ; ポートは1-65535の数値のみ許可
     if (!IsInteger(LiveSplitPort) || LiveSplitPort < 1 || LiveSplitPort > 65535) {
         DebugLog("Security: Invalid port rejected: " . LiveSplitPort)
-        return ""
+        return results
+    }
+
+    commandLines := ""
+    for index, command in commands {
+        escapedCommand := StrReplace(command, "'", "''")
+        commandLines .= "    '" . escapedCommand . "',`n"
     }
 
     ; PowerShellスクリプトを一時ファイルに作成
     psScript := (
+        "$ErrorActionPreference = 'Stop'`n"
         "try {`n"
+        "    `$commands = @(`n"
+        commandLines
+        "    )`n"
         "    `$client = New-Object System.Net.Sockets.TcpClient`n"
         "    `$client.Connect('" . LiveSplitHost . "', " . LiveSplitPort . ")`n"
         "    `$stream = `$client.GetStream()`n"
+        "    `$stream.ReadTimeout = 1500`n"
+        "    `$stream.WriteTimeout = 1500`n"
         "    `$writer = New-Object System.IO.StreamWriter(`$stream)`n"
         "    `$reader = New-Object System.IO.StreamReader(`$stream)`n"
         "    `$writer.AutoFlush = `$true`n"
-        "    `$writer.WriteLine('" . command . "')`n"
-        "    Start-Sleep -Milliseconds 100`n"
-        "    if (`$stream.DataAvailable) {`n"
-        "        `$response = `$reader.ReadLine()`n"
-        "        Write-Output `$response`n"
+        "    for (`$i = 0; `$i -lt `$commands.Count; `$i++) {`n"
+        "        `$response = ''`n"
+        "        try {`n"
+        "            `$writer.WriteLine(`$commands[`$i])`n"
+        "            `$response = `$reader.ReadLine()`n"
+        "        } catch {`n"
+        "            `$response = ''`n"
+        "            break`n"
+        "        }`n"
+        "        Write-Output ('R' + `$i + '=' + `$response)`n"
         "    }`n"
         "    `$client.Close()`n"
         "} catch {`n"
-        "    Write-Output ''`n"
+        "    for (`$i = 0; `$i -lt `$commands.Count; `$i++) {`n"
+        "        Write-Output ('R' + `$i + '=')`n"
+        "    }`n"
         "}`n"
     )
 
@@ -198,14 +222,39 @@ SendLiveSplitCommand(command) {
                 FileDelete(outputFile)
             }
 
-            return Trim(output, "`r`n `t")
+            for line in StrSplit(output, "`n", "`r") {
+                line := Trim(line)
+                eqPos := InStr(line, "=")
+                if (SubStr(line, 1, 1) != "R" || eqPos == 0) {
+                    continue
+                }
+
+                responseIndex := SubStr(line, 2, eqPos - 2)
+                if (!IsInteger(responseIndex)) {
+                    continue
+                }
+
+                responseIndex := Integer(responseIndex)
+                if (responseIndex >= 1 && responseIndex <= results.Length) {
+                    results[responseIndex] := SubStr(line, eqPos + 1)
+                }
+            }
+
+            return results
         }
 
-        return ""
+        DebugLog("LiveSplit command batch: no output")
+        return results
     } catch as err {
         DebugLog("Command error: " . err.Message)
-        return ""
+        return results
     }
+}
+
+; LiveSplitにTCPソケット経由で単一コマンドを送信（テスト用ラッパー）
+SendLiveSplitCommand(command) {
+    results := SendLiveSplitCommands([command])
+    return results.Length > 0 ? results[1] : ""
 }
 
 ; OBS WebSocket経由でソースの表示/非表示を直接制御（PowerShell経由）
@@ -341,9 +390,167 @@ try {
     }
 }
 
+; スプリット完了前にBest Segments累積時間を保存する
+StoreBestSnapshot(splitIndex, bestSegmentTime) {
+    global BestSegmentSnapshots
+
+    if (!IsInteger(splitIndex) || Integer(splitIndex) < 0 || bestSegmentTime == "" || bestSegmentTime == "-") {
+        return
+    }
+
+    BestSegmentSnapshots[Integer(splitIndex)] := bestSegmentTime
+}
+
+; 保存済みBest Segments累積値から完了セグメントのベストタイムを作る
+GetBestSegmentSeconds(completedIndex) {
+    global BestSegmentSnapshots
+
+    if (completedIndex < 0) {
+        return ""
+    }
+
+    if (completedIndex == 0) {
+        return BestSegmentSnapshots.Has(0) ? ParseTimeToSeconds(BestSegmentSnapshots[0]) : ""
+    }
+
+    if (!BestSegmentSnapshots.Has(completedIndex) || !BestSegmentSnapshots.Has(completedIndex - 1)) {
+        return ""
+    }
+
+    return ParseTimeToSeconds(BestSegmentSnapshots[completedIndex]) - ParseTimeToSeconds(BestSegmentSnapshots[completedIndex - 1])
+}
+
+; 途中起動や取りこぼしに備えて、splitsファイルからBest Segment時間を復元する
+LoadBestSegmentsFromSplitsFile() {
+    global BestSegmentSnapshots, LastSplitsSnapshotAttempt, LoadedSplitsPath
+
+    now := A_TickCount
+    if (LastSplitsSnapshotAttempt != 0 && now - LastSplitsSnapshotAttempt < 10000) {
+        return
+    }
+    LastSplitsSnapshotAttempt := now
+
+    splitsPath := SendLiveSplitCommand("getsplitspath")
+    if (splitsPath == "" || splitsPath == "-" || !FileExist(splitsPath)) {
+        DebugLog("Splits file snapshot unavailable: [" . splitsPath . "]")
+        return
+    }
+
+    EnvSet "LIVESPLIT_SPLITS_PATH", splitsPath
+    psScript := "
+(
+$ErrorActionPreference = 'Stop'
+try {
+    [xml]$xml = Get-Content -LiteralPath $env:LIVESPLIT_SPLITS_PATH -Raw
+    $segments = @($xml.Run.Segments.Segment)
+    $durations = @()
+    for ($i = 0; $i -lt $segments.Count; $i++) {
+        $best = $segments[$i].BestSegmentTime
+        if ($null -eq $best) {
+            Write-Output 'ERR: incomplete Best Segment data'
+            return
+        }
+        $realTime = $best.SelectSingleNode('./RealTime')
+        $gameTime = $best.SelectSingleNode('./GameTime')
+        $duration = ''
+        if ($realTime -and -not [string]::IsNullOrWhiteSpace($realTime.InnerText)) {
+            $duration = $realTime.InnerText
+        } elseif ($gameTime -and -not [string]::IsNullOrWhiteSpace($gameTime.InnerText)) {
+            $duration = $gameTime.InnerText
+        }
+        if ([string]::IsNullOrWhiteSpace($duration)) {
+            Write-Output 'ERR: incomplete Best Segment data'
+            return
+        }
+        $durations += [System.Xml.XmlConvert]::ToTimeSpan($duration).TotalSeconds
+    }
+    $cumulative = 0
+    for ($i = 0; $i -lt $durations.Count; $i++) {
+        $cumulative += $durations[$i]
+        Write-Output ('B' + $i + '=' + $cumulative.ToString([System.Globalization.CultureInfo]::InvariantCulture))
+    }
+} catch {
+    Write-Output ('ERR: ' + $_.Exception.Message)
+}
+)"
+
+    tempFile := A_Temp . "\livesplit_best_segments.ps1"
+    try {
+        file := FileOpen(tempFile, "w", "UTF-8")
+        file.Write(psScript)
+        file.Close()
+
+        outputFile := A_Temp . "\livesplit_best_segments_output.txt"
+        cmdLine := "powershell.exe -WindowStyle Hidden -ExecutionPolicy Bypass -NoProfile -Command `"& '" . tempFile . "' | Out-File -Encoding UTF8 '" . outputFile . "'`""
+        shell := ComObject("WScript.Shell")
+        shell.Run(cmdLine, 0, true)
+
+        if !FileExist(outputFile) {
+            DebugLog("Splits file snapshot: no output")
+            return
+        }
+
+        outputFileObj := FileOpen(outputFile, "r")
+        output := outputFileObj.Read()
+        outputFileObj.Close()
+        FileDelete(outputFile)
+
+        fileSnapshots := Map()
+        hasParseError := InStr(output, "ERR: ") > 0
+        for line in StrSplit(output, "`n", "`r") {
+            line := Trim(line)
+            eqPos := InStr(line, "=")
+            if (SubStr(line, 1, 1) != "B" || eqPos == 0) {
+                continue
+            }
+
+            segmentIndex := SubStr(line, 2, eqPos - 2)
+            segmentTime := SubStr(line, eqPos + 1)
+            if (!IsInteger(segmentIndex)) {
+                continue
+            }
+
+            if (!hasParseError && segmentTime != "" && segmentTime != "-") {
+                fileSnapshots[Integer(segmentIndex)] := segmentTime
+            }
+        }
+
+        ; パース成功時だけ入れ替える。失敗時に現在の監視スナップショットを失わない。
+        if (!hasParseError) {
+            BestSegmentSnapshots.Clear()
+            if (splitsPath != LoadedSplitsPath) {
+                LoadedSplitsPath := splitsPath
+            }
+
+            for segmentIndex, segmentTime in fileSnapshots {
+                BestSegmentSnapshots[segmentIndex] := segmentTime
+            }
+        }
+
+        DebugLog("Splits file snapshot loaded: " . fileSnapshots.Count . " entries"
+            . ", parse error=" . (hasParseError ? "yes" : "no")
+            . ", total " . BestSegmentSnapshots.Count)
+    } catch as err {
+        DebugLog("Splits file snapshot error: " . err.Message)
+    }
+}
+
+; 起動時に必須設定を可視化する（フォールバックは残すが、黙失敗を避ける）
+ValidateStartupConfig() {
+    global OBSSceneName, OBSSourceName, LiveSplitHost, LiveSplitPort, OBSHost, OBSPort
+
+    DebugLog("Config effective - LiveSplit=" . LiveSplitHost . ":" . LiveSplitPort
+        . ", OBS=" . OBSHost . ":" . OBSPort
+        . ", Scene=[" . OBSSceneName . "]"
+        . ", Source=[" . OBSSourceName . "]")
+
+    if (OBSSceneName == "" || OBSSourceName == "") {
+        TrayTip "LiveSplit Gold Alert", "OBS SceneName / SourceName 未設定です。LiveSplitGoldAlert.ini を確認してください。", 2
+    }
+}
+
 CheckGold() {
-    global PreviousLastSplitTime, PreviousComparisonTime, PreviousComparisonIndex
-    global PrevPrevComparisonTime, PrevPrevComparisonIndex, LastCheckTime
+    global PreviousLastSplitTime, LastCheckTime, BestSegmentSnapshots
 
     ; レート制限: 最後のチェックから500ms以内は何もしない
     currentTime := A_TickCount
@@ -353,148 +560,98 @@ CheckGold() {
     LastCheckTime := currentTime
 
     try {
-        ; スプリット完了を検出するため、最終スプリット時間（累積）を取得
-        lastSplitTime := SendLiveSplitCommand("getlastsplittime")
+        ; インデックスとBest Segmentsを先に取得してからlast timeを見る。
+        ; 同一TCPセッションで取得することで、スプリット直前の比較値を保存しやすくする。
+        responses := SendLiveSplitCommands([
+            "getsplitindex",
+            "getcomparisonsplittime Best Segments",
+            "getlastsplittime"
+        ])
 
-        ; 初回起動時・リセット後・スプリット取り消し後: 前回の時間を初期化するだけで終了
+        splitIndex := responses[1]
+        bestSegmentTime := responses[2]
+        lastSplitTime := responses[3]
+
+        if (lastSplitTime == "") {
+            return
+        }
+
+        StoreBestSnapshot(splitIndex, bestSegmentTime)
+        if (IsInteger(splitIndex) && BestSegmentSnapshots.Count < (Integer(splitIndex) + 1)) {
+            LoadBestSegmentsFromSplitsFile()
+        }
+
+        ; 初回起動時・リセット後: 次の最初のスプリットに備えて状態を揃える
         if (PreviousLastSplitTime == "" || lastSplitTime == "-") {
             PreviousLastSplitTime := lastSplitTime
-            ; Best Segments比較から前回のベストセグメント累積時間を取得
-            bestSegmentTime := SendLiveSplitCommand("getcomparisonsplittime Best Segments")
-            splitIndex := SendLiveSplitCommand("getsplitindex")
-            ; リセット時は履歴をクリア
-            PrevPrevComparisonTime := ""
-            PrevPrevComparisonIndex := -1
-            if (bestSegmentTime != "" && bestSegmentTime != "-" && IsInteger(splitIndex)) {
-                PreviousComparisonTime := bestSegmentTime
-                PreviousComparisonIndex := splitIndex
-            } else {
-                ; 比較データ・インデックスが読めない場合はクリアしておく（次の判定でスキップされる）
-                PreviousComparisonTime := ""
-                PreviousComparisonIndex := -1
-            }
-            DebugLog("Initial/Reset state - Last: [" . lastSplitTime . "], Best Segment: [" . bestSegmentTime . "]")
+            DebugLog("Initial/Reset state - Index: [" . splitIndex . "]"
+                . ", Last: [" . lastSplitTime . "]"
+                . ", Best Segment: [" . bestSegmentTime . "]")
             return
         }
 
         ; 最終スプリット時間が変わった場合（新しいスプリット完了）
-        if (lastSplitTime != "" && lastSplitTime != PreviousLastSplitTime) {
+        if (lastSplitTime == PreviousLastSplitTime) {
+            return
+        }
 
-            ; スプリット取り消しなどで時間が逆戻りした場合は再初期化
-            ; （PreviousLastSplitTimeが "-" の初回スプリットでは判定しない）
-            if (PreviousLastSplitTime != "" && PreviousLastSplitTime != "-"
-                && ParseTimeToSeconds(lastSplitTime) < ParseTimeToSeconds(PreviousLastSplitTime)) {
-                DebugLog("=== UNDO SPLIT DETECTED (time regression) - re-initializing ===")
-                PreviousLastSplitTime := lastSplitTime
-                bestSegmentTime := SendLiveSplitCommand("getcomparisonsplittime Best Segments")
-                splitIndex := SendLiveSplitCommand("getsplitindex")
-                PrevPrevComparisonTime := ""
-                PrevPrevComparisonIndex := -1
-                if (bestSegmentTime != "" && bestSegmentTime != "-" && IsInteger(splitIndex)) {
-                    PreviousComparisonTime := bestSegmentTime
-                    PreviousComparisonIndex := splitIndex
-                } else {
-                    PreviousComparisonTime := ""
-                    PreviousComparisonIndex := -1
-                }
-                return
-            }
-
-            DebugLog("=== NEW SPLIT DETECTED ===")
-
-            ; 少し待ってからBest Segments比較時間を取得
-            Sleep 200
-            bestSegmentTime := SendLiveSplitCommand("getcomparisonsplittime Best Segments")
-
-            ; 現在のスプリットインデックスも取得してデバッグ
-            splitIndex := SendLiveSplitCommand("getsplitindex")
-            delta := SendLiveSplitCommand("getdelta")
-
-            DebugLog("Split Index: [" . splitIndex . "], Delta: [" . delta . "]")
-            DebugLog("Previous Last Split:  [" . PreviousLastSplitTime . "]")
-            DebugLog("Current Last Split:   [" . lastSplitTime . "]")
-            DebugLog("Previous Best Segment: [" . PreviousComparisonTime . "]")
-            DebugLog("Current Best Segment:  [" . bestSegmentTime . "]")
-
-            ; セグメントタイムを計算
-            ; 現在のセグメント = lastSplitTime - PreviousLastSplitTime
-            ; ベストセグメント = PreviousComparisonTime - PrevPrevComparisonTime
-            ; ※Best Segments比較の累積値同士の差から、真のセグメントベストを算出する
-            ; 読み取り失敗や途中起動で累積値が連続しない場合は判定をスキップする
-
-            ; splitIndexが読めない場合は判定できないため、スキップする
-            justCompletedIndex := -1
-            if (IsInteger(splitIndex)) {
-                justCompletedIndex := splitIndex - 1
-            }
-
-            isFirstSplit := (
-                (PreviousLastSplitTime == "" || PreviousLastSplitTime == "-")
-                && (PreviousComparisonTime != "" && PreviousComparisonTime != "-")
-                && (justCompletedIndex == 0)
-                && (PreviousComparisonIndex == 0)
-            )
-
-            isMiddleSplit := (
-                !isFirstSplit
-                && (PreviousLastSplitTime != "" && PreviousLastSplitTime != "-")
-                && (PreviousComparisonTime != "" && PreviousComparisonTime != "-")
-                && (PrevPrevComparisonTime != "" && PrevPrevComparisonTime != "-")
-                && (PreviousComparisonIndex == justCompletedIndex)
-                && (PrevPrevComparisonIndex == justCompletedIndex - 1)
-            )
-
-            if (isFirstSplit) {
-                ; 最初のスプリット: PreviousComparisonTime（B[0]）がそのままベスト
-                currentSegmentSeconds := ParseTimeToSeconds(lastSplitTime)
-                bestSegmentSeconds := ParseTimeToSeconds(PreviousComparisonTime)
-            } else if (isMiddleSplit) {
-                ; 中間スプリット: 累積値同士の差
-                currentSegmentSeconds := ParseTimeToSeconds(lastSplitTime) - ParseTimeToSeconds(PreviousLastSplitTime)
-                bestSegmentSeconds := ParseTimeToSeconds(PreviousComparisonTime) - ParseTimeToSeconds(PrevPrevComparisonTime)
-            }
-
-            if (isFirstSplit || isMiddleSplit) {
-                DebugLog("Current Segment Time: " . Round(currentSegmentSeconds, 3) . " seconds")
-                DebugLog("Best Segment Time:    " . Round(bestSegmentSeconds, 3) . " seconds")
-
-                ; ゴールド判定: 現在のセグメントタイム < ベストセグメントタイム
-                isGold := (currentSegmentSeconds < bestSegmentSeconds)
-
-                DebugLog("Gold check: " . (isGold ? "YES - New segment best!" : "NO - Not a gold"))
-
-                if (isGold) {
-                    DebugLog(">>> GOLD SPLIT DETECTED! <<<")
-
-                    ; 再確認
-                    Sleep 100
-                    lastSplitTime2 := SendLiveSplitCommand("getlastsplittime")
-
-                    if (lastSplitTime2 == lastSplitTime) {
-                        DebugLog("*** CONFIRMED GOLD - Triggering alert! ***")
-                        improvement := bestSegmentSeconds - currentSegmentSeconds
-                        DebugLog("Improvement: " . Round(improvement, 3) . " seconds")
-                        TriggerGoldAlert("Segment: " . Round(currentSegmentSeconds, 2) . "s (Best: " . Round(bestSegmentSeconds, 2) . "s)")
-                    } else {
-                        DebugLog("Split time changed during re-check - skipping")
-                    }
-                }
-            } else {
-                DebugLog("No valid Best Segment data available - skipping gold check")
-            }
-
-            ; 次のチェックのために現在の値を保存
+        ; スプリット取り消しなどで時間が逆戻りした場合は再初期化
+        if (ParseTimeToSeconds(lastSplitTime) < ParseTimeToSeconds(PreviousLastSplitTime)) {
+            DebugLog("=== UNDO SPLIT DETECTED (time regression) - re-initializing ===")
             PreviousLastSplitTime := lastSplitTime
-            ; 比較データ・インデックスが読めた場合のみシフトする（読めなかった場合は次回の判定でスキップされる）
-            if (bestSegmentTime != "" && bestSegmentTime != "-" && IsInteger(splitIndex)) {
-                PrevPrevComparisonTime := PreviousComparisonTime
-                PrevPrevComparisonIndex := PreviousComparisonIndex
-                PreviousComparisonTime := bestSegmentTime
-                PreviousComparisonIndex := splitIndex
+            return
+        }
+
+        DebugLog("=== NEW SPLIT DETECTED ===")
+        DebugLog("Split Index: [" . splitIndex . "]")
+        DebugLog("Previous Last Split:  [" . PreviousLastSplitTime . "]")
+        DebugLog("Current Last Split:   [" . lastSplitTime . "]")
+
+        ; splitIndexが読めない場合は完了インデックスも確定しないためスキップする
+        justCompletedIndex := -1
+        if (IsInteger(splitIndex)) {
+            justCompletedIndex := Integer(splitIndex) - 1
+        }
+
+        currentSegmentSeconds := ""
+        if (justCompletedIndex == 0) {
+            currentSegmentSeconds := ParseTimeToSeconds(lastSplitTime)
+        } else if (justCompletedIndex > 0 && PreviousLastSplitTime != "-" && PreviousLastSplitTime != "") {
+            currentSegmentSeconds := ParseTimeToSeconds(lastSplitTime) - ParseTimeToSeconds(PreviousLastSplitTime)
+        }
+
+        bestSegmentSeconds := GetBestSegmentSeconds(justCompletedIndex)
+        hasComparableSegment := (currentSegmentSeconds != "" && bestSegmentSeconds != "")
+
+        if (!hasComparableSegment) {
+            DebugLog("No valid pre-split Best Segment snapshot - completed index: " . justCompletedIndex)
+        } else {
+            DebugLog("Current Segment Time: " . Round(currentSegmentSeconds, 3) . " seconds")
+            DebugLog("Best Segment Time:    " . Round(bestSegmentSeconds, 3) . " seconds")
+
+            ; ゴールド判定: 現在のセグメントタイム < ベストセグメントタイム
+            isGold := (currentSegmentSeconds < bestSegmentSeconds)
+            DebugLog("Gold check: " . (isGold ? "YES - New segment best!" : "NO - Not a gold"))
+
+            if (isGold) {
+                DebugLog(">>> GOLD SPLIT DETECTED! <<<")
+
+                ; 再確認
+                confirmResponses := SendLiveSplitCommands(["getlastsplittime"])
+                if (confirmResponses[1] == lastSplitTime) {
+                    DebugLog("*** CONFIRMED GOLD - Triggering alert! ***")
+                    improvement := bestSegmentSeconds - currentSegmentSeconds
+                    DebugLog("Improvement: " . Round(improvement, 3) . " seconds")
+                    TriggerGoldAlert("Segment: " . Round(currentSegmentSeconds, 2) . "s (Best: " . Round(bestSegmentSeconds, 2) . "s)")
+                } else {
+                    DebugLog("Split time changed during re-check - skipping")
+                }
             }
         }
+
+        PreviousLastSplitTime := lastSplitTime
     } catch as err {
-        ; エラーは無視（接続できない場合など）
+        DebugLog("CheckGold error: " . err.Message)
     }
 }
 

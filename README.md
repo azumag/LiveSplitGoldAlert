@@ -134,7 +134,7 @@ DebugMode = false
 
 これにより：
 - **真のゴールドのみを検出**（PBより速いだけのグリーンは検出されない）
-- **スクリプト再起動後も正確に動作**（LiveSplitに保存されたデータを使用）
+- **スクリプト再起動後も正確に動作**（保存済みsplitsファイルからBest Segment時間を復元し、スプリット直前のBest Segments累積値も保持）
 - **ホットキー送信が不要**（権限差・フォーカス・ポーリング取りこぼしの問題を回避）
 
 ## トラブルシューティング
@@ -146,7 +146,9 @@ DebugMode = false
 2. ポート番号が `16834` になっているか確認
 3. LiveSplitにBest Segmentsデータが存在するか確認
    - 最低1回は完走している必要があります
-4. デバッグログを確認
+4. 途中から監視を開始した場合は、splitsファイルが保存されているか確認
+   - 保存済みファイルがあれば、起動時にBest Segment時間を読み込んで復元します
+5. デバッグログを確認
    - INIの`[General]`の`DebugMode`を`true`に設定して `Ctrl+Alt+L` でログを開く
 
 ### OBS側で動画が表示されない
@@ -154,7 +156,8 @@ DebugMode = false
 1. OBS 28以上で実行しているか確認（それ以前はWebSocketプラグインの導入が必要）
 2. `ツール` → `obs-websocket設定` でサーバーが有効になっているか確認
 3. `LiveSplitGoldAlert.ini` の `Password` / `SceneName` / `SourceName` が正しいか確認
-4. WebSocket接続テスト
+4. スクリプト起動時にSceneName / SourceName未設定の通知が出ていないか確認
+5. WebSocket接続テスト
    - INIの`[General]`の`DebugMode`を`true`に設定して `Ctrl+Alt+H` でテスト可能
 
 ### 動画が自動的に消えない
